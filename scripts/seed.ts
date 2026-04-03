@@ -45,6 +45,8 @@ async function seed() {
 
   // Drop and recreate tables for a clean seed
   sqlite.exec(`
+    DROP TABLE IF EXISTS lesson_comments;
+    DROP TABLE IF EXISTS course_reviews;
     DROP TABLE IF EXISTS video_watch_events;
     DROP TABLE IF EXISTS quiz_answers;
     DROP TABLE IF EXISTS quiz_attempts;
@@ -1727,6 +1729,141 @@ You've completed the Building REST APIs course. You now have the skills to build
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (2 redeemed, 3 available).`
   );
 
+  // ─── Lesson Comments ───
+
+  const commentLesson1 = course1LessonIds[0];
+  const commentLesson2 = course1LessonIds[2];
+
+  const comment1 = db
+    .insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[0].id,
+      content:
+        "This was a great introduction! I finally understand why TypeScript catches so many bugs at compile time.",
+      createdAt: daysAgo(25),
+      updatedAt: daysAgo(25),
+    })
+    .returning()
+    .get();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: instructor1.id,
+      parentId: comment1.id,
+      content:
+        "Glad it clicked! Wait until we get to generics — that's where the type system really shines.",
+      createdAt: daysAgo(24),
+      updatedAt: daysAgo(24),
+    })
+    .run();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[1].id,
+      parentId: comment1.id,
+      content:
+        "Same here. I was skeptical at first but the error messages are so much better than plain JS.",
+      createdAt: daysAgo(23),
+      updatedAt: daysAgo(23),
+    })
+    .run();
+
+  const comment2 = db
+    .insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[2].id,
+      content: "Is there a recommended VS Code extension for TypeScript beyond the built-in support?",
+      createdAt: daysAgo(20),
+      updatedAt: daysAgo(20),
+    })
+    .returning()
+    .get();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: instructor1.id,
+      parentId: comment2.id,
+      content:
+        "The built-in TypeScript language server is excellent. I also recommend the Error Lens extension for inline error display.",
+      createdAt: daysAgo(19),
+      updatedAt: daysAgo(19),
+    })
+    .run();
+
+  const hiddenComment = db
+    .insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[3].id,
+      content: "This lesson is way too basic, waste of time honestly.",
+      hiddenAt: daysAgo(14),
+      hiddenByUserId: instructor1.id,
+      createdAt: daysAgo(15),
+      updatedAt: daysAgo(14),
+    })
+    .returning()
+    .get();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[0].id,
+      parentId: hiddenComment.id,
+      content: "I disagree — the pacing is great for beginners. Not everyone starts at the same level.",
+      createdAt: daysAgo(14),
+      updatedAt: daysAgo(14),
+    })
+    .run();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[4].id,
+      content: "Quick question: does TypeScript work well with Vite or do I need special config?",
+      createdAt: daysAgo(10),
+      updatedAt: daysAgo(10),
+    })
+    .run();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson2,
+      userId: students[0].id,
+      content:
+        "The section on union types blew my mind. I never thought about modeling state transitions that way.",
+      createdAt: daysAgo(18),
+      updatedAt: daysAgo(18),
+    })
+    .run();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson2,
+      userId: students[1].id,
+      content: "Could you show an example of discriminated unions with React component props? That would be really helpful.",
+      createdAt: daysAgo(16),
+      updatedAt: daysAgo(16),
+    })
+    .run();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson2,
+      userId: instructor1.id,
+      content:
+        "Great discussion here! I added a bonus example in the GitHub repo for this lesson showing discriminated unions with React props.",
+      createdAt: daysAgo(15),
+      updatedAt: daysAgo(15),
+    })
+    .run();
+
+  console.log("Created 11 lesson comments (1 hidden, 2 threads with replies).");
+
   console.log("\n✓ Seed complete!");
   console.log("  Users: 9 (1 admin, 2 instructors, 6 students)");
   console.log("  Categories: 5");
@@ -1737,6 +1874,7 @@ You've completed the Building REST APIs course. You now have the skills to build
   console.log("  Enrollments: 7");
   console.log("  Purchases: 6 (5 individual + 1 team)");
   console.log("  Teams: 1 (with 5 coupons)");
+  console.log("  Lesson comments: 11 (1 hidden, 2 threads)");
 }
 
 seed().catch(console.error);

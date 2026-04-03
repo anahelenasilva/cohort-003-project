@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
-import { Link, useFetcher, useNavigate } from "react-router";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Link, useFetcher, useNavigate, useRevalidator } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/courses.$slug.lessons.$lessonId";
 import {
@@ -26,7 +26,14 @@ import {
   getBestAttempt,
 } from "~/services/quizService";
 import { computeResult } from "~/services/quizScoringService";
-import { LessonProgressStatus } from "~/db/schema";
+import { LessonProgressStatus, UserRole } from "~/db/schema";
+import {
+  getCommentsForLesson,
+  getCommentCount,
+  type CommentThread,
+  type CommentReply,
+} from "~/services/commentService";
+import { getUserById } from "~/services/userService";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import {
@@ -37,14 +44,18 @@ import {
   ChevronRight,
   Circle,
   Clock,
+  EyeOff,
   Github,
   HelpCircle,
   MapPin,
+  MessageSquare,
   PlayCircle,
-  ShieldAlert,
-  XCircle,
-  Trophy,
+  Reply,
   RotateCcw,
+  ShieldAlert,
+  Trophy,
+  Undo2,
+  XCircle,
 } from "lucide-react";
 import { cn, formatDuration } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
@@ -248,6 +259,17 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     }
   }
 
+  let isInstructor = false;
+  let isAdmin = false;
+  if (currentUserId) {
+    isInstructor = currentUserId === course.instructorId;
+    const currentUser = getUserById(currentUserId);
+    isAdmin = currentUser?.role === UserRole.Admin;
+  }
+  const includeHidden = isInstructor || isAdmin;
+  const comments = getCommentsForLesson(lessonId, includeHidden, 50, 0);
+  const commentCount = getCommentCount(lessonId, includeHidden);
+
   return {
     course: {
       id: courseWithDetails.id,
@@ -281,6 +303,10 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
+    comments,
+    commentCount,
+    isInstructor,
+    isAdmin,
   };
 }
 
@@ -382,6 +408,10 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
+    comments,
+    commentCount,
+    isInstructor,
+    isAdmin,
   } = loaderData;
   const [autoplay, toggleAutoplay] = useAutoplay();
   const fetcher = useFetcher({ key: `mark-complete-${lesson.id}` });
@@ -592,6 +622,17 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
             </div>
           )}
 
+          {/* Comments Section */}
+          {(enrolled || isInstructor || isAdmin) && currentUserId && (
+            <CommentSection
+              lessonId={lesson.id}
+              comments={comments}
+              commentCount={commentCount}
+              currentUserId={currentUserId}
+              canModerate={isInstructor || isAdmin}
+            />
+          )}
+
           {/* Prev/Next Navigation */}
           <div className="flex items-center justify-between border-t pt-6">
             {prevLesson ? (
@@ -762,6 +803,372 @@ function CurriculumSidebar({
         </nav>
       </div>
     </aside>
+  );
+}
+
+function formatTimeAgo(dateString: string): string {
+  const now = Date.now();
+  const then = new Date(dateString).getTime();
+  const seconds = Math.floor((now - then) / 1000);
+
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
+}
+
+function UserAvatar({
+  user,
+  size = "sm",
+}: {
+  user: { name: string; avatarUrl: string | null };
+  size?: "sm" | "md";
+}) {
+  const sizeClass = size === "sm" ? "size-8" : "size-10";
+  const textSize = size === "sm" ? "text-xs" : "text-sm";
+
+  if (user.avatarUrl) {
+    return (
+      <img
+        src={user.avatarUrl}
+        alt={user.name}
+        className={`${sizeClass} shrink-0 rounded-full bg-muted`}
+      />
+    );
+  }
+
+  const initials = user.name
+    .split(" ")
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+  return (
+    <div
+      className={`${sizeClass} ${textSize} flex shrink-0 items-center justify-center rounded-full bg-primary/10 font-medium text-primary`}
+    >
+      {initials}
+    </div>
+  );
+}
+
+function CommentSection({
+  lessonId,
+  comments: initialComments,
+  commentCount: initialCount,
+  currentUserId,
+  canModerate,
+}: {
+  lessonId: number;
+  comments: CommentThread[];
+  commentCount: number;
+  currentUserId: number;
+  canModerate: boolean;
+}) {
+  const [comments, setComments] = useState(initialComments);
+  const [commentCount, setCommentCount] = useState(initialCount);
+  const [newComment, setNewComment] = useState("");
+  const [replyingTo, setReplyingTo] = useState<number | null>(null);
+  const [replyContent, setReplyContent] = useState("");
+  const [isPosting, setIsPosting] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const revalidator = useRevalidator();
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setComments(initialComments);
+    setCommentCount(initialCount);
+  }, [initialComments, initialCount]);
+
+  const hasMore = comments.length < commentCount;
+
+  async function postComment(content: string, parentId?: number) {
+    setIsPosting(true);
+    try {
+      const response = await fetch("/api/lesson-comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          intent: "create",
+          lessonId,
+          content,
+          parentId,
+        }),
+      });
+
+      if (!response.ok) return;
+
+      setNewComment("");
+      setReplyContent("");
+      setReplyingTo(null);
+      revalidator.revalidate();
+
+      if (!parentId) {
+        setTimeout(() => {
+          bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+        }, 300);
+      }
+    } finally {
+      setIsPosting(false);
+    }
+  }
+
+  async function moderateComment(commentId: number, intent: "hide" | "restore") {
+    const response = await fetch("/api/lesson-comments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ intent, commentId }),
+    });
+
+    if (response.ok) {
+      revalidator.revalidate();
+    }
+  }
+
+  async function loadMore() {
+    setIsLoadingMore(true);
+    try {
+      const url = new URL("/api/lesson-comments", window.location.origin);
+      url.searchParams.set("lessonId", String(lessonId));
+      url.searchParams.set("offset", String(comments.length));
+      url.searchParams.set("limit", "50");
+
+      const response = await fetch(url);
+      if (!response.ok) return;
+
+      const data = await response.json();
+      setComments((prev) => [...prev, ...data.comments]);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }
+
+  return (
+    <div className="mb-8">
+      <div className="mb-4 flex items-center gap-2">
+        <MessageSquare className="size-5 text-primary" />
+        <h2 className="text-xl font-semibold">
+          Discussion{commentCount > 0 ? ` (${commentCount})` : ""}
+        </h2>
+      </div>
+
+      <Card>
+        <CardContent className="p-6">
+          <div className="mb-6">
+            <textarea
+              value={newComment}
+              onChange={(e) => setNewComment(e.target.value)}
+              placeholder="Share your thoughts on this lesson..."
+              className="w-full resize-none rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              rows={3}
+            />
+            <div className="mt-2 flex justify-end">
+              <Button
+                size="sm"
+                disabled={!newComment.trim() || isPosting}
+                onClick={() => postComment(newComment.trim())}
+              >
+                {isPosting ? "Posting..." : "Post Comment"}
+              </Button>
+            </div>
+          </div>
+
+          {comments.length === 0 && (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No comments yet. Be the first to start the discussion!
+            </p>
+          )}
+
+          <div className="space-y-6">
+            {comments.map((thread) => (
+              <div key={thread.id}>
+                {thread.removed ? (
+                  <div className="flex items-center gap-2 rounded-md bg-muted/50 px-3 py-2 text-sm italic text-muted-foreground">
+                    <EyeOff className="size-4" />
+                    [removed]
+                  </div>
+                ) : (
+                  <div
+                    className={cn(
+                      "group",
+                      thread.hidden && "rounded-md bg-muted/30 p-3 opacity-60"
+                    )}
+                  >
+                    <div className="flex gap-3">
+                      <UserAvatar user={thread.user!} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium">
+                            {thread.user!.name}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {formatTimeAgo(thread.createdAt)}
+                          </span>
+                          {thread.hidden && (
+                            <span className="rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-700 dark:bg-red-950 dark:text-red-400">
+                              Hidden
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1 whitespace-pre-wrap text-sm">
+                          {thread.content}
+                        </p>
+                        <div className="mt-1.5 flex items-center gap-2">
+                          {!thread.hidden && (
+                            <button
+                              onClick={() =>
+                                setReplyingTo(
+                                  replyingTo === thread.id ? null : thread.id
+                                )
+                              }
+                              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                            >
+                              <Reply className="size-3" />
+                              Reply
+                            </button>
+                          )}
+                          {canModerate && !thread.hidden && (
+                            <button
+                              onClick={() => moderateComment(thread.id, "hide")}
+                              className="flex items-center gap-1 text-xs text-muted-foreground opacity-0 hover:text-red-600 group-hover:opacity-100"
+                            >
+                              <EyeOff className="size-3" />
+                              Hide
+                            </button>
+                          )}
+                          {canModerate && thread.hidden && (
+                            <button
+                              onClick={() => moderateComment(thread.id, "restore")}
+                              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                            >
+                              <Undo2 className="size-3" />
+                              Restore
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {thread.replies.length > 0 && (
+                  <div className="ml-8 mt-3 space-y-3 border-l-2 border-border pl-4">
+                    {thread.replies.map((reply) => (
+                      <div
+                        key={reply.id}
+                        className={cn(
+                          "group",
+                          reply.hidden && "rounded-md bg-muted/30 p-2 opacity-60"
+                        )}
+                      >
+                        <div className="flex gap-3">
+                          <UserAvatar user={reply.user} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium">
+                                {reply.user.name}
+                              </span>
+                              <span className="text-xs text-muted-foreground">
+                                {formatTimeAgo(reply.createdAt)}
+                              </span>
+                              {reply.hidden && (
+                                <span className="rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-700 dark:bg-red-950 dark:text-red-400">
+                                  Hidden
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-1 whitespace-pre-wrap text-sm">
+                              {reply.content}
+                            </p>
+                            {canModerate && (
+                              <div className="mt-1.5">
+                                {!reply.hidden ? (
+                                  <button
+                                    onClick={() => moderateComment(reply.id, "hide")}
+                                    className="flex items-center gap-1 text-xs text-muted-foreground opacity-0 hover:text-red-600 group-hover:opacity-100"
+                                  >
+                                    <EyeOff className="size-3" />
+                                    Hide
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => moderateComment(reply.id, "restore")}
+                                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                                  >
+                                    <Undo2 className="size-3" />
+                                    Restore
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {replyingTo === thread.id && !thread.removed && (
+                  <div className="ml-8 mt-3 border-l-2 border-border pl-4">
+                    <textarea
+                      value={replyContent}
+                      onChange={(e) => setReplyContent(e.target.value)}
+                      placeholder={`Reply to ${thread.user?.name ?? "this comment"}...`}
+                      className="w-full resize-none rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      rows={2}
+                      autoFocus
+                    />
+                    <div className="mt-2 flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        disabled={!replyContent.trim() || isPosting}
+                        onClick={() =>
+                          postComment(replyContent.trim(), thread.id)
+                        }
+                      >
+                        {isPosting ? "Posting..." : "Reply"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setReplyingTo(null);
+                          setReplyContent("");
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {hasMore && (
+            <div className="mt-6 text-center">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isLoadingMore}
+                onClick={loadMore}
+              >
+                {isLoadingMore ? "Loading..." : "Load more comments"}
+              </Button>
+            </div>
+          )}
+
+          <div ref={bottomRef} />
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
