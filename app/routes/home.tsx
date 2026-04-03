@@ -7,6 +7,8 @@ import { buildCourseQuery, getLessonCountForCourse } from "~/services/courseServ
 import { getAllCategories } from "~/services/categoryService";
 import { CourseStatus } from "~/db/schema";
 import { BookOpen, GraduationCap, Users, ArrowRight, User, Moon, Sun } from "lucide-react";
+import { getAverageRatingsForCourses } from "~/services/reviewService";
+import { StarRating } from "~/components/star-rating";
 import { CourseImage } from "~/components/course-image";
 import { DevUI } from "~/components/dev-ui";
 import { getAllUsers, getUserById } from "~/services/userService";
@@ -22,10 +24,17 @@ export function meta({}: Route.MetaArgs) {
 
 export async function loader({ request }: Route.LoaderArgs) {
   const courses = buildCourseQuery(null, null, CourseStatus.Published, "newest", 50, 0);
-  const featured = courses.slice(0, 3).map((course) => ({
-    ...course,
-    lessonCount: getLessonCountForCourse(course.id),
-  }));
+  const featuredSlice = courses.slice(0, 3);
+  const ratingsMap = getAverageRatingsForCourses(featuredSlice.map((c) => c.id));
+  const featured = featuredSlice.map((course) => {
+    const rating = ratingsMap.get(course.id);
+    return {
+      ...course,
+      lessonCount: getLessonCountForCourse(course.id),
+      ratingAverage: rating?.average ?? null,
+      ratingCount: rating?.count ?? 0,
+    };
+  });
   const categories = getAllCategories();
   const users = getAllUsers();
   const currentUserId = await getCurrentUserId(request);
@@ -187,15 +196,22 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                       {course.description}
                     </p>
                   </CardContent>
-                  <CardFooter className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span className="flex items-center gap-1">
-                      <User className="size-3" />
-                      {course.instructorName ?? "Instructor"}
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <BookOpen className="size-3" />
-                      {course.lessonCount} lessons
-                    </span>
+                  <CardFooter className="flex flex-col gap-2 text-xs text-muted-foreground">
+                    <div className="flex w-full items-center justify-between">
+                      <span className="flex items-center gap-1">
+                        <User className="size-3" />
+                        {course.instructorName ?? "Instructor"}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <BookOpen className="size-3" />
+                        {course.lessonCount} lessons
+                      </span>
+                    </div>
+                    {course.ratingCount > 0 && (
+                      <div className="w-full">
+                        <StarRating average={course.ratingAverage} count={course.ratingCount} />
+                      </div>
+                    )}
                   </CardFooter>
                 </Card>
               </Link>

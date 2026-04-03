@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Link, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/courses.$slug";
@@ -39,6 +39,8 @@ import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
 import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
+import { getAverageRating, getUserReview } from "~/services/reviewService";
+import { StarRating } from "~/components/star-rating";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
 import { calculatePppPrice, getCountryTierInfo } from "~/lib/ppp";
@@ -91,6 +93,11 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     }
   }
 
+  const courseRating = getAverageRating(course.id);
+  const userReview = currentUserId && enrolled
+    ? getUserReview(currentUserId, course.id)
+    : null;
+
   // Render sales copy from Markdown to HTML server-side
   const salesCopyHtml = courseWithDetails.salesCopy
     ? await renderMarkdown(courseWithDetails.salesCopy)
@@ -113,6 +120,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     currentUserId,
     pppPrice,
     tierInfo,
+    courseRating,
+    userReviewRating: userReview?.rating ?? null,
   };
 }
 
@@ -181,6 +190,8 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     currentUserId,
     pppPrice,
     tierInfo,
+    courseRating,
+    userReviewRating,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -197,6 +208,29 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
       );
     }
   }, [searchParams, setSearchParams]);
+
+  const [currentRating, setCurrentRating] = useState(userReviewRating);
+  const [liveRating, setLiveRating] = useState(courseRating);
+
+  const handleRate = useCallback(
+    async (rating: number) => {
+      setCurrentRating(rating);
+      try {
+        const res = await fetch("/api/course-review", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ courseId: course.id, rating }),
+        });
+        if (res.ok) {
+          const body: { success: boolean; average: number | null; count: number } = await res.json();
+          setLiveRating({ average: body.average, count: body.count });
+        }
+      } catch {
+        setCurrentRating(userReviewRating);
+      }
+    },
+    [course.id, userReviewRating]
+  );
 
   const totalDuration = course.modules.reduce(
     (sum, mod) =>
@@ -320,6 +354,9 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
               {formatDuration(totalDuration, true, false, false)} total
             </span>
           )}
+          {liveRating.count > 0 && (
+            <StarRating average={liveRating.average} count={liveRating.count} />
+          )}
         </div>
       </div>
 
@@ -413,6 +450,15 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                       Buy More Seats
                     </Button>
                   </Link>
+                  <div className="pt-2">
+                    <p className="mb-1.5 text-sm font-medium">Rate this course</p>
+                    <StarRating
+                      interactive
+                      userRating={currentRating}
+                      onChange={handleRate}
+                      size="md"
+                    />
+                  </div>
                 </>
               ) : (
                 enrollButton
